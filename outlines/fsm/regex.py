@@ -771,7 +771,8 @@ def get_vocabulary_transition_keys(
 
     return vocab_transition_keys
 
-def process_state(start_state, fsm_info, vocabulary, vocabulary_transition_keys):
+def process_state(args):
+    start_state, fsm_info, vocabulary, vocabulary_transition_keys = args
     token_ids_end_states = state_scan_tokens(
         fsm_info.transitions,
         fsm_info.alphabet_symbol_mapping,
@@ -788,6 +789,7 @@ def create_fsm_index_end_to_end(
     fsm_info: FSMInfo,
     vocabulary: List[Tuple[str, Sequence[int]]],
     frozen_tokens: List[str] = [],
+    num_processes: int = None
 ) -> Dict[int, Set[Tuple[int, int]]]:
     """Create an FSM state-to-vocabulary map/index through end-to-end token parsing.
 
@@ -800,6 +802,8 @@ def create_fsm_index_end_to_end(
         A list of tuples, each containing a token and a list of equivalent token ids.
     frozen_tokens: (`List[str]`, *optional*):
         A list of tokens that are kept as-is when transforming the FSM.
+    num_processes: (`int`, *optional*):
+        Number of processes to use. Defaults to half of available CPU cores.
 
     Returns
     -------
@@ -807,6 +811,8 @@ def create_fsm_index_end_to_end(
         A mapping from FSM states to sets of tuples containing token ids and the end
         states of the FSM after parsing the token.
     """
+    if num_processes is None:
+        num_processes = max(1, os.cpu_count() // 2)
 
     states_to_token_subsets: Dict[int, Set[Tuple[int, int]]] = {}
     seen: Set[int] = set()
@@ -828,13 +834,13 @@ def create_fsm_index_end_to_end(
         ),
     )
 
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=num_processes) as executor:
         while next_states:
             batch = list(next_states)
             next_states.clear()
 
             futures = [
-                executor.submit(process_state, state, fsm_info, vocabulary, vocabulary_transition_keys)
+                executor.submit(process_state, (state, fsm_info, vocabulary, vocabulary_transition_keys))
                 for state in batch
             ]
 
