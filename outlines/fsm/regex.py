@@ -26,7 +26,10 @@ from interegular.fsm import (
     anything_else,
 )
 from numba.typed.typedobjectutils import _nonoptional
+
+import multiprocessing
 from tqdm import tqdm
+from typing import Dict, List, Set, Tuple, Sequence
 
 if TYPE_CHECKING:
     from outlines.models.tokenizer import Tokenizer
@@ -768,6 +771,19 @@ def get_vocabulary_transition_keys(
 
     return vocab_transition_keys
 
+def process_state(args):
+    start_state, fsm_info, vocabulary, vocabulary_transition_keys = args
+    token_ids_end_states = state_scan_tokens(
+        fsm_info.transitions,
+        fsm_info.alphabet_symbol_mapping,
+        fsm_info.alphabet_anything_value,
+        fsm_info.initial,
+        fsm_info.finals,
+        vocabulary,
+        vocabulary_transition_keys,
+        start_state,
+    )
+    return start_state, token_ids_end_states
 
 def create_fsm_index_end_to_end(
     fsm_info: FSMInfo,
@@ -793,15 +809,12 @@ def create_fsm_index_end_to_end(
         states of the FSM after parsing the token.
     """
 
-    # TODO: Consider using a `List` of `Set`s instead; that way we can JIT this
-    # code, too.
     states_to_token_subsets: Dict[int, Set[Tuple[int, int]]] = {}
     seen: Set[int] = set()
     next_states = {fsm_info.initial}
 
     pbar = tqdm(
-        total=len(set(fsm_info.transitions.values()))
-        + 1,  # all transitions plus initial
+        total=len(set(fsm_info.transitions.values())) + 1,
         desc="Compiling FSM index for all state transitions",
     )
 
@@ -816,31 +829,26 @@ def create_fsm_index_end_to_end(
         ),
     )
 
-    while next_states:
-        start_state = next_states.pop()
+    with multiprocessing.Pool() as pool:
+        while next_states:
+            batch_size = min(multiprocessing.cpu_count() * 2, len(next_states))
+            batch = [next_states.pop() for _ in range(batch_size)]
 
-        token_ids_end_states = state_scan_tokens(
-            fsm_info.transitions,
-            fsm_info.alphabet_symbol_mapping,
-            fsm_info.alphabet_anything_value,
-            fsm_info.initial,
-            fsm_info.finals,
-            vocabulary,
-            vocabulary_transition_keys,
-            start_state,
-        )
+            args = [(state, fsm_info, vocabulary, vocabulary_transition_keys) for state in batch]
+            results = pool.map(process_state, args)
 
-        for token_id_and_end_state in token_ids_end_states:
-            states_to_token_subsets.setdefault(start_state, set()).add(
-                token_id_and_end_state
-            )
-            end_state = token_id_and_end_state[1]
-            if end_state not in seen:
-                next_states.add(end_state)
+            for start_state, token_ids_end_states in results:
+                for token_id_and_end_state in token_ids_end_states:
+                    states_to_token_subsets.setdefault(start_state, set()).add(
+                        token_id_and_end_state
+                    )
+                    end_state = token_id_and_end_state[1]
+                    if end_state not in seen:
+                        next_states.add(end_state)
 
-        if start_state not in seen:
-            pbar.update(1)
-            seen.add(start_state)
+                if start_state not in seen:
+                    pbar.update(1)
+                    seen.add(start_state)
 
     pbar.close()
 
