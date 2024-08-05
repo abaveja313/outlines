@@ -27,7 +27,7 @@ from interegular.fsm import (
 )
 from numba.typed.typedobjectutils import _nonoptional
 
-import multiprocessing
+import concurrent.futures
 from tqdm import tqdm
 from typing import Dict, List, Set, Tuple, Sequence
 
@@ -771,8 +771,7 @@ def get_vocabulary_transition_keys(
 
     return vocab_transition_keys
 
-def process_state(args):
-    start_state, fsm_info, vocabulary, vocabulary_transition_keys = args
+def process_state(start_state, fsm_info, vocabulary, vocabulary_transition_keys):
     token_ids_end_states = state_scan_tokens(
         fsm_info.transitions,
         fsm_info.alphabet_symbol_mapping,
@@ -829,15 +828,18 @@ def create_fsm_index_end_to_end(
         ),
     )
 
-    with multiprocessing.Pool() as pool:
+    with concurrent.futures.ThreadPoolExecutor() as executor:
         while next_states:
-            batch_size = min(multiprocessing.cpu_count() * 2, len(next_states))
-            batch = [next_states.pop() for _ in range(batch_size)]
+            batch = list(next_states)
+            next_states.clear()
 
-            args = [(state, fsm_info, vocabulary, vocabulary_transition_keys) for state in batch]
-            results = pool.map(process_state, args)
+            futures = [
+                executor.submit(process_state, state, fsm_info, vocabulary, vocabulary_transition_keys)
+                for state in batch
+            ]
 
-            for start_state, token_ids_end_states in results:
+            for future in concurrent.futures.as_completed(futures):
+                start_state, token_ids_end_states = future.result()
                 for token_id_and_end_state in token_ids_end_states:
                     states_to_token_subsets.setdefault(start_state, set()).add(
                         token_id_and_end_state
