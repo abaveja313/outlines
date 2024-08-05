@@ -1,4 +1,5 @@
 import re
+import os
 from collections import namedtuple
 from functools import lru_cache
 from typing import (
@@ -771,7 +772,8 @@ def get_vocabulary_transition_keys(
 
     return vocab_transition_keys
 
-def process_state(start_state, fsm_info, vocabulary, vocabulary_transition_keys):
+def process_state(args):
+    start_state, fsm_info, vocabulary, vocabulary_transition_keys = args
     token_ids_end_states = state_scan_tokens(
         fsm_info.transitions,
         fsm_info.alphabet_symbol_mapping,
@@ -788,7 +790,7 @@ def create_fsm_index_end_to_end(
     fsm_info: FSMInfo,
     vocabulary: List[Tuple[str, Sequence[int]]],
     frozen_tokens: List[str] = [],
-    num_threads: int = None
+    num_processes: int = None
 ) -> Dict[int, Set[Tuple[int, int]]]:
     """Create an FSM state-to-vocabulary map/index through end-to-end token parsing.
 
@@ -801,8 +803,8 @@ def create_fsm_index_end_to_end(
         A list of tuples, each containing a token and a list of equivalent token ids.
     frozen_tokens: (`List[str]`, *optional*):
         A list of tokens that are kept as-is when transforming the FSM.
-    num_threads: (`int`, *optional*):
-        Number of threads to use. Defaults to twice the number of CPU cores.
+    num_processes: (`int`, *optional*):
+        Number of processes to use. Defaults to half of available CPU cores.
 
     Returns
     -------
@@ -810,8 +812,8 @@ def create_fsm_index_end_to_end(
         A mapping from FSM states to sets of tuples containing token ids and the end
         states of the FSM after parsing the token.
     """
-    if num_threads is None:
-        num_threads = os.cpu_count() * 2  # Default to twice the number of CPU cores
+    if num_processes is None:
+        num_processes = max(1, os.cpu_count() // 2)
 
     states_to_token_subsets: Dict[int, Set[Tuple[int, int]]] = {}
     seen: Set[int] = set()
@@ -833,17 +835,17 @@ def create_fsm_index_end_to_end(
         ),
     )
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=num_processes) as executor:
         while next_states:
-            # Submit all current states for processing
-            future_to_state = {
-                executor.submit(process_state, state, fsm_info, vocabulary, vocabulary_transition_keys): state
-                for state in next_states
-            }
-
+            batch = list(next_states)
             next_states.clear()
 
-            for future in tqdm(concurrent.futures.as_completed(future_to_state)):
+            futures = [
+                executor.submit(process_state, (state, fsm_info, vocabulary, vocabulary_transition_keys))
+                for state in batch
+            ]
+
+            for future in concurrent.futures.as_completed(futures):
                 start_state, token_ids_end_states = future.result()
                 for token_id_and_end_state in token_ids_end_states:
                     states_to_token_subsets.setdefault(start_state, set()).add(
